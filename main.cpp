@@ -47,6 +47,7 @@ int main(int argc, char* argv[])
     retrieveElements(root, "sms", "date");
     retrieveElements(root, "sms", "readable_date");//dd.mm.yyyy hh:mm:ss
     retrieveElements(root, "sms", "type");//1 seems to be received, 2 seems to be sent. -1 group chat
+    //protocol=65: Anrufinfo        
     qDebug()<<"Done!";
 return a.exec();
 }
