@@ -30,9 +30,7 @@
 #include <bb/pim/contacts/ContactConsts>
 #include <bb/pim/account/Result>
 
-
-
-
+#include <bb/system/SystemToast>
 
 using namespace bb::pim;
 
@@ -45,6 +43,7 @@ XML2SMS::~XML2SMS()
 
 void XML2SMS::onXMLFileSelect(const QString qs)
 {
+    bb::system::SystemToast toast;
     QDomDocument doc;
 qDebug()<<qs;
         QFile file(qs);
@@ -74,7 +73,15 @@ qDebug()<<qs;
         accountidlist.append(smsaccount);
         QDomElement root = doc.firstChildElement();
         QDomNodeList nodes = root.elementsByTagName("sms");
+        if (nodes.count() == 0)
+        {
+            toast.setBody("No SMS found in file.");
+            toast.setPosition(bb::system::SystemUiPosition::MiddleCenter);
+            toast.exec();
+            return;
+        }
         qDebug() <<"number of nodes "<<nodes.count();
+        int importedsms = 0;
         for (int i = 0; i < /*nodes.count()*/ 15; ++i)
         {
             QDomNode elm = nodes.at(i);
@@ -90,11 +97,46 @@ qDebug()<<qs;
             QStringList phonenumbers = (e.attribute("address")).split(";");
             for(typename QStringList::const_iterator pn = phonenumbers.begin(); pn != phonenumbers.end(); ++pn)
             {
-                message::MessageContact recipient = message::MessageContact(-1,
-                                                         message::MessageContact::To, *pn, *pn);
-                participants.append(recipient);
-                // Specify the recipient of the message (i.e. the destination address/MSISDN)
-                msg_builder->addRecipient(recipient);
+                contacts::ContactService contactservice;
+                contacts::ContactSearchFilters filter;
+                filter.setLimit(1);
+                QList< contacts::SearchField::Type > fields;
+                fields << contacts::SearchField::Phone;
+                filter.setSearchFields(fields);
+                filter.setSearchValue(*pn);
+                QList<contacts::Contact> contact = contactservice.searchContactsByPhoneNumber(filter);
+                if (contact.size() >= 1)
+qDebug()<<contact.size()<<" "<<contact.first().displayName();
+                if(e.attribute("type").toInt() == 1)
+                {
+                    qDebug()<<"Received from "<<*pn;
+                    if (contact.size() >= 1)
+                        qDebug()<<"Whois "<<contact.first().displayName();
+                    else
+                        qDebug()<<"not known";
+                    message::MessageContact sender = message::MessageContact(contact.size() != 1?-1:contact.first().id(),
+                                            message::MessageContact::From
+                                                                             , *pn, *pn);
+                    participants.append(sender);
+                    msg_builder->sender(sender);
+                }
+                else
+                {
+                    qDebug()<<"Sent to "<<*pn;
+                    if (contact.size() >= 1)
+                        qDebug()<<"Whois "<<contact.first().displayName();
+                    else
+                        qDebug()<<"not known";
+                    message::MessageContact recipient = message::MessageContact(contact.size() != 1?-1:contact.first().id(),
+                                            message::MessageContact::To
+                                                                             , *pn, *pn);
+                    participants.append(recipient);
+                    // Specify the recipient of the message (i.e. the destination address/MSISDN)
+                    msg_builder->addRecipient(recipient);
+                }
+                message::MessageContact recipient = message::MessageContact(contact.size() != 1?-1:contact.first().id(),
+                        e.attribute("type").toInt()==1?message::MessageContact::From : message::MessageContact::To
+                                                         , *pn, *pn);
             }
             conversationBuilder->participants(participants);
             message::Conversation conversation = *conversationBuilder;
@@ -102,23 +144,53 @@ qDebug()<<qs;
             message::ConversationKey conversationid;
             if(phonenumbers.size() == 1)
             {
+                QMap<QString, message::ConversationKey>::iterator it = conversationidmap.find(phonenumbers.first());
+                if(it != conversationidmap.end())
+                    conversationid = it.value();
+                else
+                {
+                    qDebug()<<"Number "<<phonenumbers.first()<<"not known";
+                    contacts::ContactService contactservice;
+                    contacts::ContactSearchFilters filter;
+                    filter.setLimit(1);
+                    QList< contacts::SearchField::Type > fields;
+                    fields << contacts::SearchField::Phone;
+                    filter.setSearchFields(fields);
+                    filter.setSearchValue(phonenumbers.first());
+                    QList<contacts::Contact> contact = contactservice.searchContactsByPhoneNumber(filter);
+                    qDebug()<<"matching contacts: "<<contact.count();
+                    if(contact.count() == 1)
+                    {
+                        message::MessageFilter mf;
+                        mf.insert(message::MessageFilter::ContactId, QVariant(contact.first().id()));
+                        QList<message::ConversationKey> filteredKeys = messageService.conversationKeys(smsaccount, mf);
+                        qDebug()<<"matching conversations "<<filteredKeys.count();
+                        if(filteredKeys.count() < 1)
+                        {
+                            conversationid = messageService.save(smsaccount, conversation);
+                            conversationidmap.insert(phonenumbers.first(), conversationid);
+                        }
+                        else
+                        {
+                            conversationid = filteredKeys.first();
+                            conversationidmap.insert(phonenumbers.first(), conversationid);
+                        }
+                    }
+                    else// multiple accounts match that number
+                    {
+                        conversationid = messageService.save(smsaccount, conversation);
+                        conversationidmap.insert(phonenumbers.first(), conversationid);
+                    }
+//                    conversationid = messageService.save(smsaccount, conversation);
+//                    conversationidmap.insert(phonenumbers.first(), conversationid);
+                }
 
-
-
-
-            QMap<QString, message::ConversationKey>::iterator it = conversationidmap.find(phonenumbers.first());
-                                if(it != conversationidmap.end())
-                                    conversationid = it.value();
-                                else
-                                {
-                                    conversationid = messageService.save(smsaccount, conversation);
-                                    conversationidmap.insert(phonenumbers.first(), conversationid);
-                                }
             }
             else
             {
                 conversationid = messageService.save(smsaccount, conversation);
             }
+
             // Set the message’s conversation ID
             msg_builder->conversationId(conversationid);
 
@@ -134,8 +206,9 @@ qDebug()<<qs;
             message::Message message;
             message = *msg_builder;
             message::MessageKey messagekey = messageService.save(smsaccount, message);
+            ++importedsms;
             //add the state wether we sent it or we have received it
-/*            switch(e.attribute("type").toInt())
+            switch(e.attribute("type").toInt())
             {
                 case -1:
                     messageService.setStatus(smsaccount, messagekey, message::MessageStatus::Broadcast);
@@ -149,9 +222,13 @@ qDebug()<<qs;
                     default:
                         break;
             }
-            messageService.syncAccounts(accountidlist);
-            account::Result res = accountService.syncAccounts(account::Service::Messages);*/
+//            messageService.syncAccounts(accountidlist);
+//            account::Result res = accountService.syncAccounts(account::Service::Messages);
             }
         }
-        qDebug()<<"Done loading SMS";
+        QString msg("Done importing SMS. Count: ");
+        msg += QString::number(importedsms) + " of " + QString::number(nodes.count());
+        toast.setBody(msg);
+        toast.setPosition(bb::system::SystemUiPosition::MiddleCenter);
+        toast.exec();
 }
